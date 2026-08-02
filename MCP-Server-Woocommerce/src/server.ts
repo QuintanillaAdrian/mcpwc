@@ -9,6 +9,7 @@ import {
   executeTenant,
   statusTenant,
   getTenantById,
+  getTenantCount,
   registerTenantSchema,
   RegisterTenantInput,
   ExecuteTenantInput,
@@ -19,7 +20,15 @@ const log = createLogger('api');
 
 app.use(express.json());
 
-const PORT = Number(process.env.API_PORT ?? 3001);
+// PORT es la variable que la mayoría de plataformas (DigitalOcean App
+// Platform, Heroku, Render, etc.) inyectan solas para decirle a la app en
+// qué puerto tiene que escuchar. Antes este servidor solo leía API_PORT,
+// una variable propia — funcionaba, pero obligaba a configurarla a mano en
+// cada plataforma nueva para que coincidiera. Ahora PORT tiene prioridad
+// si la plataforma la define; si no (ej. corriendo local con Docker), cae
+// a API_PORT como antes, y por último al 3001 de siempre. No rompe nada
+// de lo que ya tenías configurado.
+const PORT = Number(process.env.PORT ?? process.env.API_PORT ?? 3001);
 const API_TOKEN = process.env.API_TOKEN || 'default-token-change-in-production';
 
 // Campos que nunca deben salir en texto plano en los logs
@@ -61,6 +70,22 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   });
 
   next();
+});
+
+/**
+ * GET /health
+ * Chequeo de salud SIN autenticación — se registra antes de
+ * `app.use(validateBearerToken)` a propósito, para quedar fuera de esa
+ * protección. Lo usa la plataforma donde corra esto (DigitalOcean App
+ * Platform, etc.) para saber si el proceso está vivo, sin necesitar el
+ * API_TOKEN.
+ *
+ * tenantsLoaded es solo un número (nunca los datos de los tenants) — de
+ * un vistazo confirma si bootstrapTenants() cargó algo al arrancar, sin
+ * tener que ir a mirar logs.
+ */
+app.get('/health', (_req: Request, res: Response) => {
+  res.status(200).json({ ok: true, tenantsLoaded: getTenantCount() });
 });
 
 // Middleware para validar Bearer token

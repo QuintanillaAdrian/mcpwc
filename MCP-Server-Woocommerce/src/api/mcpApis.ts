@@ -78,6 +78,16 @@ export function getTenantById(id: string): TenantRecord | null {
   return tenant ? { ...tenant } : null;
 }
 
+/**
+ * Cantidad de tenants cargados en memoria ahora mismo — solo el número,
+ * nunca los datos. Pensado para la ruta /health de server.ts: sirve para
+ * confirmar de un vistazo si bootstrapTenants() cargó algo al arrancar,
+ * sin exponer credenciales ni tener que ir a revisar logs.
+ */
+export function getTenantCount(): number {
+  return tenantStore.size;
+}
+
 export function registerTenant(input: RegisterTenantInput): RegisterTenantResult {
   const now = new Date().toISOString();
   const tenantId = input.tenantId;
