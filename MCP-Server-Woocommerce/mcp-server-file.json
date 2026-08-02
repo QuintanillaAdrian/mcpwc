@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "woocommerce": {
+      "command": "node",
+      "args": ["c:/Documentos/Asistencia Projects/MCP-Server-Woocommerce/dist/index.js"],
+      "env": {
+        "WORDPRESS_SITE_URL": "http://localhost/wordpress-6.9.1",
+        "WOOCOMMERCE_CONSUMER_KEY": "ck_1674c656e08355ef94134a2925f4ac74137d6920",
+        "WOOCOMMERCE_CONSUMER_SECRET": "cs_5b466fdcb022a20ccfeea14f4c1d9ec1433bbf87",
+        "WORDPRESS_USERNAME": "adrian",
+        "WORDPRESS_PASSWORD": "AQplugintestWP"
+      }
+    }
+  }
+}
