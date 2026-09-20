@@ -6,44 +6,44 @@ Servidor HTTP multi-tenant para WooCommerce. Expone 84 herramientas de la API RE
 
 ## Arquitectura
 
-```
-npm start
-    │
-    ▼
-bootstrapTenants()  ←  GET /api/internal/tenants/active  (backend)
-    │                       └─ descifra credenciales AES-256-GCM
-    │                       └─ carga tenantStore en memoria
-    ▼
-app.listen(3001)
+Corre como Lambda en AWS (desplegado desde `infra-stack.ts` del repo
+`chatbot-backend`, junto con el resto del pipeline). No mantiene ningún
+registro de tenants en memoria — cada ejecución de tool lee la credencial
+fresca directo de DynamoDB, sin caché:
 
-         Tu backend (Anthropic API)
-                 │
-                 ▼ POST /mcp/execute  { tenantId, toolName, toolArgs }
-          src/server.ts  (Express HTTP)
-                 │
-                 ▼
-          src/api/mcpApis.ts
-                 │
-          tenantStore.get(tenantId)
-                 │
-          ┌──────┴──────────────────────────────┐
-          │ encontrado                           │ no encontrado
-          ▼                                     ▼
-   usa credenciales              GET /api/internal/tenants/:id  (lazy-load)
-   del registro                       └─ descifra → registra → continúa
-          │                                     │
-          └──────────────┬──────────────────────┘
-                         ▼
-            tenantContext.run(credentials, ...)
-                         │
-                         ▼
-              src/tools/*.ts  (84 funciones)
-                         │
-                  getAxios()  →  instancia axios aislada por tenant
-                         │
-                         ▼
-                WooCommerce REST API
 ```
+Tu backend (Anthropic API / Bedrock tool-use)
+        │
+        ▼ POST /mcp/execute  { tenantId, toolName, toolArgs }
+ src/app.ts  (Express, vía lambda.ts + serverless-http)
+        │
+        ▼
+ src/api/mcpApis.ts → executeTenant()
+        │
+        ▼
+ src/tenantCredentials.ts → getTenantCredentials(tenantId)
+        │
+        ├─ GetItem tenant_woocommerce  (DynamoDB, por IAM)
+        ├─ GetItem tenants             (DynamoDB, chequea status !== suspended)
+        └─ decrypt() con ENCRYPTION_KEY compartida (AES-256-GCM)
+        │
+        ▼
+ tenantContext.run(credentials, ...)
+        │
+        ▼
+ src/tools/*.ts  (84 funciones)
+        │
+ getAxios()  →  instancia axios aislada por tenant
+        │
+        ▼
+ WooCommerce REST API
+```
+
+El backend (`chatbot-backend`) sigue siendo el único que **escribe**
+`tenant_woocommerce` (Paso 2 del onboarding, rotación de credenciales) — el
+MCP solo lee, con permiso IAM de solo lectura sobre esa tabla y sobre
+`tenants`. No hay ningún paso de "registrar" o "avisarle" al MCP: en cuanto
+el backend guarda credenciales nuevas, el próximo `/mcp/execute` ya las ve.
 
 ---
 
@@ -52,10 +52,17 @@ app.listen(3001)
 | Variable | Descripción | Default |
 |---|---|---|
 | `API_TOKEN` | Bearer token para autenticar todas las llamadas al servidor | — |
-| `API_PORT` | Puerto del servidor Express | `3001` |
-| `BACKEND_INTERNAL_URL` | URL base del backend que expone los endpoints internos | — |
-| `BACKEND_INTERNAL_TOKEN` | Bearer token para las llamadas internas al backend | — |
+| `API_PORT` | Puerto del servidor Express (solo desarrollo local, `npm run dev`) | `3001` |
 | `ENCRYPTION_KEY` | Clave AES-256-GCM en hex (64 chars = 32 bytes) compartida con el backend | — |
+| `DYNAMO_TABLE_TENANTS` | Nombre de la tabla DynamoDB `tenants` (para el chequeo de `status`) | — |
+| `DYNAMO_TABLE_TENANT_WOOCOMMERCE` | Nombre de la tabla DynamoDB `tenant_woocommerce` | — |
+| `AWS_REGION` | Región de DynamoDB. En Lambda la inyecta AWS solo, no hace falta seteala | `us-east-2` |
+
+En producción (Lambda) estas variables las setea `infra-stack.ts` del repo
+`chatbot-backend` automáticamente al desplegar — no hay que tocarlas a mano
+ahí. Solo hacen falta en un `.env` local para correr `npm run dev` contra
+las tablas reales (requiere credenciales de AWS configuradas localmente,
+`aws configure`, con permiso de lectura sobre esas dos tablas).
 
 Generar claves seguras:
 ```bash
@@ -65,6 +72,11 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ---
 
 ## Instalación y arranque
+
+Esto es para desarrollo local. En producción no se corre `npm start` en
+ningún hosting — se despliega como Lambda con `npx cdk deploy` desde
+`chatbot-backend/infra` (ver `McpFunction` en `infra-stack.ts` de ese repo),
+que empaqueta `src/lambda.ts` directo con esbuild.
 
 ```bash
 # 1. Instalar dependencias
@@ -95,81 +107,9 @@ Todos los endpoints requieren el header:
 Authorization: Bearer <API_TOKEN>
 ```
 
-### `POST /mcp/register` — Registrar tenant
+### `GET /health` — Chequeo de salud
 
-Registra una nueva tienda WooCommerce. El `tenantId` es obligatorio y debe ser único.
-
-```json
-// Request
-{
-  "tenantId": "tienda-a",
-  "siteUrl": "https://tienda-a.com",
-  "consumerKey": "ck_xxx",
-  "consumerSecret": "cs_xxx"
-}
-
-// Response 201
-{
-  "ok": true,
-  "message": "Tenant registered successfully",
-  "tenantId": "tienda-a"
-}
-```
-
----
-
-### `PUT /mcp/tenant/:id` — Actualizar tenant
-
-Actualiza parcialmente las credenciales de un tenant ya registrado.
-
-```json
-// Request — PUT /mcp/tenant/tienda-a
-{
-  "siteUrl": "https://nueva-url.com"
-}
-
-// Response 200
-{
-  "ok": true,
-  "message": "Tenant updated successfully",
-  "tenant": { ... }
-}
-```
-
----
-
-### `GET /mcp/tenant/:id/status` — Estado del tenant
-
-Devuelve los datos registrados de un tenant.
-
-```json
-// Response 200
-{
-  "ok": true,
-  "message": "Tenant found",
-  "tenant": {
-    "id": "tienda-a",
-    "tenantId": "tienda-a",
-    "siteUrl": "https://tienda-a.com",
-    "createdAt": "2026-01-01T00:00:00.000Z",
-    "updatedAt": "2026-01-01T00:00:00.000Z"
-  }
-}
-```
-
----
-
-### `DELETE /mcp/tenant/:id` — Eliminar tenant
-
-Elimina el tenant del registro en memoria.
-
-```json
-// Response 200
-{
-  "ok": true,
-  "message": "Tenant deleted successfully"
-}
-```
+Sin autenticación. Devuelve `{ ok: true }` si el proceso está vivo.
 
 ---
 
@@ -182,22 +122,29 @@ Ejecuta cualquiera de las 84 herramientas disponibles en nombre de un tenant.
 {
   "tenantId": "tienda-a",
   "toolName": "listProducts",
-  "toolArgs": { "per_page": 5, "page": 1 }
+  "toolArgs": { "search": "pijama", "category": 17, "min_price": "5000", "max_price": "20000", "per_page": 5, "page": 1 }
 }
 
 // Response 200
 {
   "ok": true,
   "message": "Tool 'listProducts' executed successfully for tenant 'tienda-a'",
-  "result": [ ... ]
+  "result": { "products": [ ... ], "total": 3, "totalPages": 1 }
 }
 ```
+
+`listProducts` es la única tool de listado que devuelve un objeto (`{products, total, totalPages}`)
+en vez de un array plano — `total`/`totalPages` salen de los headers reales de WooCommerce
+(`X-WP-Total`/`X-WP-TotalPages`), no del body, así quien llama sabe si la página que recibió es
+todo el catálogo o una fracción de uno más grande. Filtros soportados: `search` (nombre/descripción,
+texto libre), `category` (id numérico — resolvelo antes con `listProductCategories`, no acepta el
+nombre), `min_price`/`max_price` (rango de precio, combinables entre sí y con los anteriores).
 
 **Herramientas disponibles por categoría:**
 
 | Categoría | Herramientas |
 |---|---|
-| Productos | `listProducts`, `createProduct`, `getProduct`, `updateProduct`, `deleteProduct` |
+| Productos | `listProducts` (`search`/`category`/`min_price`/`max_price`/`per_page`/`page`), `createProduct`, `getProduct`, `updateProduct`, `deleteProduct` |
 | Variaciones | `createProductVariation`, `getProductVariation`, `listProductVariations`, `updateProductVariation`, `deleteProductVariation`, `batchProductVariations` |
 | Categorías | `createProductCategory`, `getProductCategory`, `listProductCategories`, `updateProductCategory`, `deleteProductCategory`, `batchProductCategories` |
 | Etiquetas | `createProductTag`, `getProductTag`, `listProductTags`, `updateProductTag`, `deleteProductTag`, `batchProductTags` |
@@ -219,20 +166,26 @@ Ejecuta cualquiera de las 84 herramientas disponibles en nombre de un tenant.
 
 ## Carga de tenants
 
-### Bootstrap al arranque
-Al iniciar, el servidor llama a `GET /api/internal/tenants/active` en el backend y carga todos los tenants activos en memoria. Si el backend no está disponible, el servidor arranca igual y los tenants se pueden cargar manualmente.
+No hay registro ni caché de tenants — cada `POST /mcp/execute` llama a
+`getTenantCredentials(tenantId)` (`src/tenantCredentials.ts`), que lee
+`tenant_woocommerce` y `tenants` directo de DynamoDB por IAM y descifra las
+credenciales en el momento. Si el tenant no existe, no tiene WooCommerce
+verificado, o está suspendido, devuelve `Tenant not found`.
 
-### Lazy-load on-demand
-Si llega un request para un `tenantId` que no está en memoria, el servidor intenta cargarlo automáticamente desde `GET /api/internal/tenants/:id`. Si el backend responde 404, retorna `Tenant not found`. Dos requests simultáneas para el mismo tenant nuevo usan la misma promesa en vuelo — el backend solo recibe una llamada.
-
-### Registro manual (sin backend)
-Siempre disponible vía `POST /mcp/register` para desarrollo local o tenants puntuales.
+Esto reemplaza al diseño anterior (Map en memoria + `bootstrapTenants()` al
+arrancar + lazy-load vía HTTP al backend), que existía porque el MCP corría
+fuera de AWS (DigitalOcean App Platform) y no tenía forma de leer DynamoDB
+por IAM. Ahora que vive en la misma cuenta, lee la fuente real directo, sin
+una copia que se pueda desactualizar.
 
 ---
 
 ## Credenciales cifradas
 
-El backend almacena `consumerKey` y `consumerSecret` cifrados en PostgreSQL. Al responder al MCP, los envía todavía cifrados. El MCP los descifra con `ENCRYPTION_KEY` (AES-256-GCM).
+El backend cifra `consumerKey`/`consumerSecret` antes de guardarlos en
+`tenant_woocommerce` (DynamoDB). El MCP los lee tal cual (todavía cifrados)
+y los descifra él mismo con `ENCRYPTION_KEY` (AES-256-GCM) — la misma clave
+en los dos lados, nunca viaja el texto plano por fuera de esos dos procesos.
 
 Formato del campo cifrado (producido por el backend):
 ```
@@ -255,26 +208,6 @@ function encrypt(text, keyHex) {
 
 ---
 
-## Endpoints internos requeridos en el backend
-
-El backend debe exponer estos dos endpoints protegidos con `BACKEND_INTERNAL_TOKEN`:
-
-### `GET /api/internal/tenants/active`
-Retorna todos los tenants activos:
-```json
-[
-  {
-    "tenantId": "tienda-a",
-    "siteUrl": "https://tienda-a.com",
-    "consumerKey": "<base64 cifrado>",
-    "consumerSecret": "<base64 cifrado>"
-  }
-]
-```
-
-### `GET /api/internal/tenants/:tenantId`
-Retorna un tenant específico (mismo formato). Responde `404` si no existe.
-
 ## Aislamiento de credenciales (AsyncLocalStorage)
 
 `axios.defaults` es un singleton global — si dos requests corren en paralelo para tenants distintos, se pisarían las credenciales. La solución usa `AsyncLocalStorage` de Node.js:
@@ -294,21 +227,24 @@ Cada request lleva sus credenciales en su propia "mochila" async. `getAxios()` l
 
 ```
 src/
-├── server.ts             # Servidor Express HTTP + arranque con bootstrap
-├── bootstrap.ts          # bootstrapTenants() y fetchTenant() lazy-load
-├── tenantContext.ts      # AsyncLocalStorage con TenantCredentials por request
+├── app.ts                 # Express app (rutas + middleware), sin arrancar servidor
+├── server.ts               # Entry point de desarrollo local (npm run dev) — app.listen()
+├── lambda.ts               # Entry point de producción (Lambda) — serverless-http(app)
+├── tenantCredentials.ts    # getTenantCredentials(): lee DynamoDB directo, sin caché
+├── tenantContext.ts        # AsyncLocalStorage con TenantCredentials por request
 ├── api/
-│   ├── index.ts          # Re-exporta mcpApis.ts
-│   └── mcpApis.ts        # Lógica de registro y ejecución de tenants
+│   ├── index.ts             # Re-exporta mcpApis.ts
+│   └── mcpApis.ts           # executeTenant(): ejecuta una tool para un tenant
 ├── utils/
-│   └── crypto.ts         # decrypt() AES-256-GCM
+│   ├── crypto.ts             # decrypt() AES-256-GCM
+│   └── logger.ts
 └── tools/
-    ├── axiosClient.ts    # getAxios(): instancia axios aislada por tenant
-    ├── toolRegistry.ts   # Mapa nombre → función (84 herramientas)
+    ├── axiosClient.ts       # getAxios(): instancia axios aislada por tenant
+    ├── toolRegistry.ts      # Mapa nombre → función (84 herramientas)
     ├── products.ts
     ├── orders.ts
     ├── categories.ts
-    └── ...               # 14 archivos más
+    └── ...                  # 14 archivos más
 ```
 
 Crear tokens: console.log(require('crypto').randomBytes(32).toString('hex'))

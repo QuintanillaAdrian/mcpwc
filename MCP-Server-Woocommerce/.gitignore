@@ -32,6 +32,22 @@ Thumbs.db
 *.njsproj
 *.sln
 
+# Secrets / credentials (keep .env.example tracked)
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Lambda / deployment artifacts
+*.zip
+.aws-sam/
+.serverless/
+.esbuild/
+cdk.out/
+samconfig.toml
+
 # Misc
 coverage/
 *.tgz
+
+.test.ps1

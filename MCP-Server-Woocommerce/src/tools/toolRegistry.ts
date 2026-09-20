@@ -21,6 +21,7 @@ import * as products from './products';
 import * as productTags from './productTags';
 import * as refunds from './refunds';
 import * as reports from './reports';
+import * as settings from './settings';
 import * as shippingClasses from './shippingClasses';
 import * as variations from './variations';
 
@@ -122,6 +123,9 @@ const registry = new Map<string, ToolFn>([
   // Custom Fields
   ['getProductCustomFieldNames', customFields.getProductCustomFieldNames],
 
+  // Settings
+  ['getCurrencySettings', settings.getCurrencySettings],
+
   // Refunds
   ['listRefunds', refunds.listRefunds],
 
@@ -152,11 +156,4 @@ const registry = new Map<string, ToolFn>([
  */
 export function getToolFunction(name: string): ToolFn | undefined {
   return registry.get(name);
-}
-
-/**
- * Returns all registered tool names (for validation/discovery).
- */
-export function listToolNames(): string[] {
-  return Array.from(registry.keys());
 }
